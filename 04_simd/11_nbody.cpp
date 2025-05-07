@@ -22,7 +22,7 @@ int main()
   }
 
   for (int i = 0; i < N; i++)
-  {
+  ¨
 
     // float ry = y[i] - y[j];  
     __m512 vxi = _mm512_set1_ps(x[i]); // Broadcasts the scalar value x[i] to all 16 lanes of a 512-bit SIMD register (each lane holds the same double)
