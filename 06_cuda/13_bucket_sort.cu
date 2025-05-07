@@ -5,7 +5,7 @@
 const int N = 50;
 const int RANGE = 5;
 
-// Kernel 1: Zero out the bucket
+// Kernel 1: Initialize bucket
 __global__ void init_bucket(int* bucket) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i < RANGE) {
@@ -13,7 +13,7 @@ __global__ void init_bucket(int* bucket) {
     }
 }
 
-// Kernel 2: Count frequency of each value
+// Kernel 2: Count occurrences
 __global__ void count_instances(int* key, int* bucket, int n) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i < n) {
@@ -21,12 +21,17 @@ __global__ void count_instances(int* key, int* bucket, int n) {
     }
 }
 
-// Kernel 3: Write sorted values based on bucket counts and prefix offsets
-__global__ void fill_sorted(int* key, int* bucket, int* prefix) {
+// Kernel 3: Write sorted output
+__global__ void write_sorted(int* bucket, int* sorted) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i < RANGE) {
-        for (int j = 0; j < bucket[i]; j++) {
-            key[prefix[i] + j] = i;
+        int offset = 0;
+        // Sequential scan inside thread block (RANGE is small)
+        for (int j = 0; j < i; j++) {
+            offset += bucket[j];
+        }
+        for (int k = 0; k < bucket[i]; k++) {
+            sorted[offset + k] = i;
         }
     }
 }
@@ -34,12 +39,11 @@ __global__ void fill_sorted(int* key, int* bucket, int* prefix) {
 int main() {
     int* key;
     int* bucket;
-    int* prefix;
+    int* sorted;
 
-    // Allocate unified memory
     cudaMallocManaged(&key, N * sizeof(int));
     cudaMallocManaged(&bucket, RANGE * sizeof(int));
-    cudaMallocManaged(&prefix, RANGE * sizeof(int));  // for offsets
+    cudaMallocManaged(&sorted, N * sizeof(int));
 
     // Fill key with random values
     printf("Original: ");
@@ -49,33 +53,27 @@ int main() {
     }
     printf("\n");
 
-    // Kernel 1: Init buckets
+    // Kernel 1: Init bucket
     init_bucket<<<1, RANGE>>>(bucket);
     cudaDeviceSynchronize();
 
-    // Kernel 2: Count frequencies
+    // Kernel 2: Count values
     count_instances<<<(N + 31) / 32, 32>>>(key, bucket, N);
     cudaDeviceSynchronize();
 
-    // Prefix sum on CPU
-    prefix[0] = 0;
-    for (int i = 1; i < RANGE; i++) {
-        prefix[i] = prefix[i - 1] + bucket[i - 1];
-    }
-
-    // Kernel 3: Fill sorted keys
-    fill_sorted<<<1, RANGE>>>(key, bucket, prefix);
+    // Kernel 3: Fill sorted array based on bucket counts
+    write_sorted<<<1, RANGE>>>(bucket, sorted);
     cudaDeviceSynchronize();
 
-    // Output sorted result
+    // Output sorted array
     printf("Sorted:   ");
     for (int i = 0; i < N; i++) {
-        printf("%d ", key[i]);
+        printf("%d ", sorted[i]);
     }
     printf("\n");
 
     cudaFree(key);
     cudaFree(bucket);
-    cudaFree(prefix);
+    cudaFree(sorted);
     return 0;
 }
