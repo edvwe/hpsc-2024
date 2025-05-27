@@ -1,9 +1,9 @@
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
 #include <fstream>
 #include <vector>
-#include <chrono>
 
 using namespace std;
 
@@ -48,158 +48,127 @@ __global__ void compute_b(matrix *b, const matrix *u, const matrix *v,
 
 // ------------------- Functions for computing p -------------------
 
-__global__ void copy_pn(const matrix *p, matrix *pn, const int nx,
-                        const int ny) {
-  int i = threadIdx.x + blockIdx.x * blockDim.x;
-  int total = nx * ny;
-
-  if (i >= total)
-    return;
-
-  pn->elems[i] = p->elems[i];
+__device__ void copy_pn(const matrix *p, matrix *pn, const int nx, const int ny,
+                        int idx) {
+  pn->elems[idx] = p->elems[idx];
 }
 
-__global__ void calc_p(matrix *p, const matrix *pn, const matrix *b,
+__device__ void calc_p(matrix *p, const matrix *pn, const matrix *b,
                        const double dx, const double dy, const int nx,
-                       const int ny) {
+                       const int ny, const int idx) {
 
-  int i = threadIdx.x + blockIdx.x * blockDim.x;
+  p->elems[idx] = (dy * dy * (pn->elems[idx + 1] + pn->elems[idx - 1]) +
+                   dx * dx * (pn->elems[idx + nx] + pn->elems[idx - nx]) -
+                   b->elems[idx] * dx * dx * dy * dy) /
+                  (2 * (dx * dx + dy * dy));
+}
+
+__device__ void pad_p(matrix *p, const int nx, const int ny, const int idx) {
+  if (idx % nx == 0)
+    p->elems[idx] = p->elems[idx + 1];
+  else if (idx % nx == nx - 1)
+    p->elems[idx] = p->elems[idx - 1];
+  else if (idx < nx)
+    p->elems[idx] = p->elems[idx + nx];
+  else if (idx > nx * ny - nx)
+    p->elems[idx] = p->elems[idx - nx];
+  else
+    printf("thread index not on edge of p");
+}
+
+__global__ void compute_p(matrix *pn, matrix *p, const matrix *b,
+                          const double dx, const double dy, const int nit,
+                          const int nx, const int ny) {
+
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
   int total = nx * ny;
 
-  if (i >= total)
+  if (idx >= total)
     return;
 
-  int row = i / nx;
-  int col = i % nx;
-
-  // Skip boundary points
-  if (row <= 0 || row >= ny - 1 || col <= 0 || col >= nx - 1)
-    return;
-
-  p->elems[i] = (dy * dy * (pn->elems[i + 1] + pn->elems[i - 1]) +
-                 dx * dx * (pn->elems[i + nx] + pn->elems[i - nx]) -
-                 b->elems[i] * dx * dx * dy * dy) /
-                (2 * (dx * dx + dy * dy));
-}
-
-__host__ void pad_p(matrix *p, const int nx,
-                    const int ny) // leave on host for now
-{
-  // pad left most and rightmost columns
-  for (int i = 0; i < nx * ny; i += nx) {
-    p->elems[i] = p->elems[i + 1];
-    p->elems[i + nx - 1] = p->elems[i + nx - 2];
-  }
-
-  // pad top and bottom row
-  for (int i = 0; i < nx; ++i) {
-    p->elems[i] = p->elems[i + nx];
-    p->elems[ny * nx - nx + i] = 0.0;
-  }
-}
-
-__host__ void compute_p(matrix *pn, matrix *p, const matrix *b, const double dx,
-                        const double dy, const int nit, const int nx,
-                        const int ny, const int BLOCKS,
-                        const int THREADS_PER_BLOCK) {
+  int row = idx / nx;
+  int col = idx % nx;
 
   for (int it = 0; it < nit; it++) {
 
-    copy_pn<<<BLOCKS, THREADS_PER_BLOCK>>>(p, pn, nx, ny);
+    copy_pn(p, pn, nx, ny, idx);
 
-    cudaDeviceSynchronize();
+    __syncthreads();
 
-    calc_p<<<BLOCKS, THREADS_PER_BLOCK>>>(p, pn, b, dx, dy, nx, ny);
+    calc_p(p, pn, b, dx, dy, nx, ny, idx);
 
-    cudaDeviceSynchronize();
+    __syncthreads();
 
-    pad_p(p, nx, ny);
+    if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
+      pad_p(p, nx, ny, idx);
   }
 }
 
 // ------------------- Functions for computing u and v -------------------
-__global__ void copy_un_vn(const matrix *u, const matrix *v, matrix *un,
-                           matrix *vn, const int nx, const int ny) {
-  int i = threadIdx.x + blockIdx.x * blockDim.x;
-  int total = nx * ny;
+__device__ void copy_un_vn(const matrix *u, const matrix *v, matrix *un,
+                           matrix *vn, const int nx, const int ny,
+                           const int idx) {
 
-  if (i >= total)
-    return;
-
-  un->elems[i] = u->elems[i];
-  vn->elems[i] = v->elems[i];
+  un->elems[idx] = u->elems[idx];
+  vn->elems[idx] = v->elems[idx];
 }
 
-__global__ void calc_u_v(matrix *u, matrix *v, const matrix *un,
+__device__ void calc_u_v(matrix *u, matrix *v, const matrix *un,
                          const matrix *vn, const matrix *p, const double dx,
                          const double dy, const double dt, const double rho,
-                         const double nu, const int nx, const int ny) {
+                         const double nu, const int nx, const int ny,
+                         const int idx) {
 
-  int i = threadIdx.x + blockIdx.x * blockDim.x;
+  u->elems[idx] =
+      un->elems[idx] -
+      un->elems[idx] * dt / dx * (un->elems[idx] - un->elems[idx - 1]) -
+      un->elems[idx] * dt / dy * (un->elems[idx] - un->elems[idx - nx]) -
+      dt / (2 * rho * dx) * (p->elems[idx + 1] - p->elems[idx - 1]) +
+      nu * dt / (dx * dx) *
+          (un->elems[idx + 1] - 2 * un->elems[idx] + un->elems[idx - 1]) +
+      nu * dt / (dy * dy) *
+          (un->elems[idx + nx] - 2 * un->elems[idx] + un->elems[idx - nx]);
+  v->elems[idx] =
+      vn->elems[idx] -
+      vn->elems[idx] * dt / dx * (vn->elems[idx] - vn->elems[idx - 1]) -
+      vn->elems[idx] * dt / dy * (vn->elems[idx] - vn->elems[idx - nx]) -
+      dt / (2 * rho * dx) * (p->elems[idx + nx] - p->elems[idx - nx]) +
+      nu * dt / (dx * dx) *
+          (vn->elems[idx + 1] - 2 * vn->elems[idx] + vn->elems[idx - 1]) +
+      nu * dt / (dy * dy) *
+          (vn->elems[idx + nx] - 2 * vn->elems[idx] + vn->elems[idx - nx]);
+}
+
+__device__ void pad_u_v(matrix *u, matrix *v, const int nx, const int ny,
+                        const int idx) {
+  u->elems[idx] = 0;
+  v->elems[idx] = 0;
+  if (idx % ny == ny - 1)
+    v->elems[idx] = 1;
+}
+
+__global__ void compute_u_v(matrix *u, matrix *v, matrix *un, matrix *vn,
+                            const matrix *p, const double dt, const double dx,
+                            const double dy, const double rho, const double nu,
+                            const int nx, const int ny) {
+
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
   int total = nx * ny;
-
-  if (i >= total)
+  if (idx >= total)
     return;
+  int row = idx / nx;
+  int col = idx % nx;
 
-  int row = i / nx;
-  int col = i % nx;
+  copy_un_vn(u, v, un, vn, nx, ny, idx);
 
-  // Skip boundary points
-  if (row <= 0 || row >= ny - 1 || col <= 0 || col >= nx - 1)
-    return;
+  __syncthreads();
 
-  // Compute u[j][i] and v[j][i]
-  u->elems[i] = un->elems[i] -
-                un->elems[i] * dt / dx * (un->elems[i] - un->elems[i - 1]) -
-                un->elems[i] * dt / dy * (un->elems[i] - un->elems[i - nx]) -
-                dt / (2 * rho * dx) * (p->elems[i + 1] - p->elems[i - 1]) +
-                nu * dt / (dx * dx) *
-                    (un->elems[i + 1] - 2 * un->elems[i] + un->elems[i - 1]) +
-                nu * dt / (dy * dy) *
-                    (un->elems[i + nx] - 2 * un->elems[i] + un->elems[i - nx]);
-  v->elems[i] = vn->elems[i] -
-                vn->elems[i] * dt / dx * (vn->elems[i] - vn->elems[i - 1]) -
-                vn->elems[i] * dt / dy * (vn->elems[i] - vn->elems[i - nx]) -
-                dt / (2 * rho * dx) * (p->elems[i + nx] - p->elems[i - nx]) +
-                nu * dt / (dx * dx) *
-                    (vn->elems[i + 1] - 2 * vn->elems[i] + vn->elems[i - 1]) +
-                nu * dt / (dy * dy) *
-                    (vn->elems[i + nx] - 2 * vn->elems[i] + vn->elems[i - nx]);
-}
+  calc_u_v(u, v, un, vn, p, dx, dy, dt, rho, nu, nx, ny, idx);
 
-__host__ void pad_u_v(matrix *u, matrix *v, const int nx, const int ny) {
-  for (int y = 0; y < ny; ++y) {
-    int rowStart = y * nx;
-    u->elems[rowStart] = 0;
-    u->elems[rowStart + nx - 1] = 0;
-    v->elems[rowStart] = 0;
-    v->elems[rowStart + nx - 1] = 0;
-  }
+  __syncthreads();
 
-  for (int x = 0; x < nx; x++) {
-    // pad top and bottom
-    u->elems[x] = 0;
-    u->elems[nx * ny - nx + x] = 1;
-    v->elems[x] = 0;
-    v->elems[nx * ny - nx + x] = 0;
-  }
-}
-
-__host__ void compute_u_v(matrix *u, matrix *v, matrix *un, matrix *vn,
-                          const matrix *p, const double dt, const double dx,
-                          const double dy, const double rho, const double nu,
-                          const int nx, const int ny, const int BLOCKS,
-                          const int THREADS_PER_BLOCK) {
-  copy_un_vn<<<BLOCKS, THREADS_PER_BLOCK>>>(u, v, un, vn, nx, ny);
-
-  cudaDeviceSynchronize();
-
-  calc_u_v<<<BLOCKS, THREADS_PER_BLOCK>>>(u, v, un, vn, p, dx, dy, dt, rho, nu,
-                                          nx, ny);
-
-  cudaDeviceSynchronize();
-
-  pad_u_v(u, v, nx, ny); // on host for now
+  if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
+    pad_u_v(u, v, nx, ny, idx);
 }
 
 void init_matrix(matrix *&mat, const int nx, const int ny) {
@@ -260,12 +229,12 @@ int main() {
 
     cudaDeviceSynchronize();
 
-    compute_p(pn, p, b, dx, dy, nit, nx, ny, BLOCKS, THREADS_PER_BLOCK);
+    compute_p<<<BLOCKS, THREADS_PER_BLOCK>>>(pn, p, b, dx, dy, nit, nx, ny);
 
     cudaDeviceSynchronize();
 
-    compute_u_v(u, v, un, vn, p, dt, dx, dy, rho, nu, nx, ny, BLOCKS,
-                THREADS_PER_BLOCK);
+    compute_u_v<<<BLOCKS, THREADS_PER_BLOCK>>>(u, v, un, vn, p, dt, dx, dy, rho,
+                                               nu, nx, ny);
 
     cudaDeviceSynchronize();
 
