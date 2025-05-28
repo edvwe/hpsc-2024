@@ -16,7 +16,6 @@ struct matrix {
 };
 
 // ------------------- Functions for computing b -------------------
-
 __global__ void compute_b(matrix *b, const matrix *u, const matrix *v,
                           const double rho, const double dt, const double dx,
                           const double dy, const int nx, const int ny) {
@@ -30,7 +29,6 @@ __global__ void compute_b(matrix *b, const matrix *u, const matrix *v,
   int row = i / nx;
   int col = i % nx;
 
-  // Skip boundary points
   if (row <= 0 || row >= ny - 1 || col <= 0 || col >= nx - 1)
     return;
 
@@ -95,12 +93,11 @@ __global__ void compute_p(matrix *pn, matrix *p, const matrix *b,
 
     __syncthreads();
 
-    calc_p(p, pn, b, dx, dy, nx, ny, idx);
-
-    __syncthreads();
-
-    if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
+    if (row > 0 && row < ny - 1 && col > 0 && col < nx - 1)
+      calc_p(p, pn, b, dx, dy, nx, ny, idx);
+    else if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
       pad_p(p, nx, ny, idx);
+    __syncthreads();
   }
 }
 
@@ -163,12 +160,11 @@ __global__ void compute_u_v(matrix *u, matrix *v, matrix *un, matrix *vn,
 
   __syncthreads();
 
-  calc_u_v(u, v, un, vn, p, dx, dy, dt, rho, nu, nx, ny, idx);
-
-  __syncthreads();
-
-  if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
+  if (row > 0 && row < ny - 1 && col > 0 && col < nx - 1)
+    calc_u_v(u, v, un, vn, p, dx, dy, dt, rho, nu, nx, ny, idx);
+  else if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
     pad_u_v(u, v, nx, ny, idx);
+  __syncthreads();
 }
 
 void init_matrix(matrix *&mat, const int nx, const int ny) {
