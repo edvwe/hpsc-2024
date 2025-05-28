@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <fstream>
 #include <vector>
+#include <chrono>
 
 using namespace std;
 typedef vector<vector<float>> matrix;
@@ -38,6 +39,9 @@ int main()
   ofstream ufile("u.dat");
   ofstream vfile("v.dat");
   ofstream pfile("p.dat");
+
+  auto tic = std::chrono::steady_clock::now();
+
   for (int n = 0; n < nt; n++)
   {
     for (int j = 1; j < ny - 1; j++)
@@ -138,7 +142,13 @@ int main()
       pfile << "\n";
     }
   }
+
+  auto toc = std::chrono::steady_clock::now();
+
   ufile.close();
   vfile.close();
   pfile.close();
+
+  double time = std::chrono::duration<double>(toc - tic).count();
+  printf("time = %lf\n", time);
 }
