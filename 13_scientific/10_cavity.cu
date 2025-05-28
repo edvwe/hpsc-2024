@@ -81,22 +81,21 @@ __global__ void compute_p(matrix *pn, matrix *p, const matrix *b,
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
   int total = nx * ny;
 
-  if (idx >= total)
-    return;
-
   int row = idx / nx;
   int col = idx % nx;
 
   for (int it = 0; it < nit; it++) {
 
-    copy_pn(p, pn, nx, ny, idx);
+    if (idx < total)
+      copy_pn(p, pn, nx, ny, idx);
 
     __syncthreads();
-
-    if (row > 0 && row < ny - 1 && col > 0 && col < nx - 1)
-      calc_p(p, pn, b, dx, dy, nx, ny, idx);
-    else if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
-      pad_p(p, nx, ny, idx);
+    if (idx < total) {
+      if (row > 0 && row < ny - 1 && col > 0 && col < nx - 1)
+        calc_p(p, pn, b, dx, dy, nx, ny, idx);
+      else if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
+        pad_p(p, nx, ny, idx);
+    }
     __syncthreads();
   }
 }
@@ -140,8 +139,8 @@ __device__ void pad_u_v(matrix *u, matrix *v, const int nx, const int ny,
                         const int idx) {
   u->elems[idx] = 0;
   v->elems[idx] = 0;
-  if (idx % ny == ny - 1)
-    v->elems[idx] = 1;
+  if (idx / nx == ny - 1)
+    u->elems[idx] = 1;
 }
 
 __global__ void compute_u_v(matrix *u, matrix *v, matrix *un, matrix *vn,
@@ -151,19 +150,20 @@ __global__ void compute_u_v(matrix *u, matrix *v, matrix *un, matrix *vn,
 
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
   int total = nx * ny;
-  if (idx >= total)
-    return;
   int row = idx / nx;
   int col = idx % nx;
 
-  copy_un_vn(u, v, un, vn, nx, ny, idx);
+  if (idx < total)
+    copy_un_vn(u, v, un, vn, nx, ny, idx);
 
   __syncthreads();
+  if (idx < total) {
 
-  if (row > 0 && row < ny - 1 && col > 0 && col < nx - 1)
-    calc_u_v(u, v, un, vn, p, dx, dy, dt, rho, nu, nx, ny, idx);
-  else if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
-    pad_u_v(u, v, nx, ny, idx);
+    if (row > 0 && row < ny - 1 && col > 0 && col < nx - 1)
+      calc_u_v(u, v, un, vn, p, dx, dy, dt, rho, nu, nx, ny, idx);
+    else if (row == 0 || row == ny - 1 || col == 0 || col == nx - 1)
+      pad_u_v(u, v, nx, ny, idx);
+  }
   __syncthreads();
 }
 
